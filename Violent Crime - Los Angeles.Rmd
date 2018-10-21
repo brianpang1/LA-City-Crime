@@ -1,0 +1,277 @@
+---
+title: "Los Angeles Crime 2010-2018"
+author: "Brian Pang"
+output: github_document
+---
+
+```{r warning = F,results='hide',message=F}
+library(ggmap)
+library(lubridate)
+library(dplyr)
+library(magrittr)
+library(stringr)
+library(scales)
+library(tidyr)
+library(lubridate)
+library(astsa)
+library(forecast)
+library(knitr)
+library(kableExtra)
+```
+
+
+#Part 1: Reading in Data, Cleaning and Creating Variables
+```{r}
+LACrime <- read.csv("~/Desktop/Datasets/LACrime.csv",header=T, na.strings=c("","NA"))
+
+#NA per column
+for(i in 1:ncol(LACrime)){
+cat(c(names(LACrime)[i],sum(is.na(LACrime[,i])),"\n"))
+}
+
+#1 New variables: Latitude and Longitude
+x2 <- gsub(pattern = '[()]', replacement = "", x= LACrime$Location)
+y2 <- str_split(x2, ',', n = 2, simplify= T)
+z2 <-cbind(LACrime,y2)
+z2$`2`[z2$`2`== ""] <- NA
+names(z2)[27:28] <- c("Latitude", "Longitude")
+z2$Latitude[z2$Latitude==0] <- NA
+z2$Longitude <- as.numeric(as.character(z2$Longitude))
+z2$Longitude[(z2$Longitude) == 0] <- NA
+z2$Latitude <- as.numeric(as.character(z2$Latitude))
+
+# New variables: Hour and HourMinSec
+x <- str_pad(as.character(LACrime$Time.Occurred),4,"0",side="left")
+y <-as.POSIXct(x, tryFormats= "%H%M")
+z <- format(y, "%H:%M:%S")
+z3 <- cbind(z2, z)
+names(z3)[29] <- "HourMinSec"
+z4 <- z3
+z4$Hour <- hour(hms(z4$HourMinSec))
+
+# New variables: WeekdayOccurred and WeekdayReported
+z4$WeekdayOcc <-  as.factor(weekdays(mdy(z4$Date.Occurred)))
+z4$WeekdayOcc <- factor(z4$WeekdayOcc, levels= c("Monday", 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'))
+z4$WeekdayRep <-  as.factor(weekdays(mdy(z4$Date.Reported)))
+z4$WeekdayRep <- factor(z4$WeekdayRep, levels= c("Monday", 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'))
+
+# New Variable - DaysUnreported
+z4$Date.Reported <- as.Date(mdy(z4$Date.Reported))
+z4$Date.Occurred <- as.Date(mdy(z4$Date.Occurred))
+z4$DaysUnreported <- as.numeric(z4$Date.Reported - z4$Date.Occurred)
+
+# New variable SimplifiedDescent
+z4$SimplifiedDescent <- z4$Victim.Descent
+z4$SimplifiedDescent[which(z4$Victim.Descent %in% c("C","D","F","J","K","L","V","Z"))] <- "A"
+z4$SimplifiedDescent[which(z4$Victim.Descent %in% c("S","U","G"))] <- "P"
+z4$SimplifiedDescent[which(z4$Victim.Descent %in% c("-","X", "O"))] <- NA
+z4$SimplifiedDescent[which(z4$SimplifiedDescent == "P")] <- "A"
+z4$SimplifiedDescent[which(z4$SimplifiedDescent == "I")] <- "W"
+z4$SimplifiedDescent <- as.factor(as.character(z4$SimplifiedDescent))
+
+# New Variable, SimplifiedAddress
+string1 <- "\\d+\\s"
+SimplifiedAddress1 <- as.character(z4$Address)
+z4$SimplifiedAddress <- as.factor(str_replace_all(SimplifiedAddress1, string1, ""))
+
+# Modify Victim.Sex variable to binary values
+z4$Victim.Sex[which(z4$Victim.Sex %in% c("X", "H", "-"))] <- NA
+z4$Victim.Sex <- as.factor(as.character(z4$Victim.Sex))
+
+# New Variable: ViolentCrime = Binary variable, indicates whether crime was of violent nature. 0= no weapon used, 1= weapon used.
+z4$ViolentCrime <- z4$Weapon.Used.Code
+z4$ViolentCrime[which(is.na(z4$Weapon.Used.Code)==T)] <- 0
+z4$ViolentCrime[which(is.na(z4$Weapon.Used.Code)==F)] <- 1
+
+# Editing Status.Description so UNK = NA
+z4$Status.Description[which(z4$Status.Description %in% "UNK")]<- NA
+z4$Status.Description <- as.factor(as.character(z4$Status.Description))
+
+# New Variable: VictimAgeGroups
+z4$VictimAgeGroups <- z4$Victim.Age
+z4$VictimAgeGroups[which(z4$Victim.Age %in% c(10:19))] <- "10-19"
+z4$VictimAgeGroups[which(z4$Victim.Age %in% c(20:29))] <- "20-29"
+z4$VictimAgeGroups[which(z4$Victim.Age %in% c(30:39))] <- "30-39"
+z4$VictimAgeGroups[which(z4$Victim.Age %in% c(40:49))] <- "40-49"
+z4$VictimAgeGroups[which(z4$Victim.Age %in% c(50:59))] <- "50-59"
+z4$VictimAgeGroups[which(z4$Victim.Age %in% c(60:69))] <- "60-69"
+z4$VictimAgeGroups[which(z4$Victim.Age %in% c(70:79))] <- "70-79"
+z4$VictimAgeGroups[which(z4$Victim.Age %in% c(80:89))] <- "80-89"
+z4$VictimAgeGroups[which(z4$Victim.Age %in% c(90:99))] <- "90-99"
+z4$VictimAgeGroups <- as.factor(z4$VictimAgeGroups)
+
+# Area.ID into factor
+z4$Area.ID <-as.factor(z4$Area.ID)
+
+```
+
+
+
+
+
+#Part Two: Exploratory Data Analysis: Summaries, Tables, Graphs
+
+Interactive Maps: \n
+1. https://brianpang.shinyapps.io/crimesbyhour/  \n
+2. https://brianpang.shinyapps.io/lacrimemapping/
+```{r warning = F, message = F}
+attach(z4)
+z4violent <- z4[which(z4$ViolentCrime==1),]
+
+#Most Common Violent crimes
+JJ1 <- as.data.frame(prop.table(table(z4$Crime.Code.Description[which(z4$ViolentCrime==1)]))) %>% arrange(desc(Freq)) %>% head(10)
+JJ3 <-ggplot(aes(x=reorder(Var1,Freq),y=Freq),data=JJ1) + geom_bar(stat="identity",fill="red",colour="black")+coord_flip()+ xlab("Crime")+ ggtitle("Violent Crime: Most Frequent") + ylim(0,.3)+scale_x_discrete(label=abbreviate(JJ1$Var1, minlength = 25))
+JJ3
+
+#Weapons Used
+JJ5<- as.data.frame(prop.table(table(z4$Weapon.Description[which(z4$ViolentCrime==1)]))) %>% arrange(desc(Freq)) %>% head(10)
+names(JJ5)[1] <- "Weapon"
+kable(JJ5)
+
+#Violent Crime: Hour Occurred 
+J2 <- as.data.frame(prop.table(table(z4$Hour[which(z4$ViolentCrime==1)])))
+J3 <-ggplot(aes(x=Var1,y=Freq), data = J2) +geom_bar(stat="identity",fill="red", colour="black") +ggtitle("Violent Crime: Time Occurred by Hour") +xlab("Hour")+ylim(0,.1)
+J3
+
+#3 Violent Crime Victims: Frequency by Age Group
+HH1 <-as.data.frame(prop.table(table(z4$VictimAgeGroups[which(z4$ViolentCrime==1)])))
+HH2 <-ggplot(aes(x=Var1,y=Freq),data =HH1) + geom_bar(stat="identity",fill="red",colour="black")+xlab("Age Group")+ylab("Frequency") + ggtitle("Violent Crime: Frequency by Victim Age Group")+ylim(0,.3)
+HH2
+
+#4 Violent Crime: Frequency by Day (Day Occurred vs Day Reported)
+h1 <-as.data.frame(prop.table(table(z4$WeekdayOcc[which(z4$ViolentCrime==1)])))
+h2 <- as.data.frame(prop.table(table(z4$WeekdayRep[which(z4$ViolentCrime==1)])))
+g4 <- cbind(h1,h2)[,-3]
+names(g4) <- c("Day", "Occurred", "Reported")
+h5 <- gather(g4,Day, Freq:Day)
+h5 <-cbind(h5, rep(c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"),2))
+names(h5) <- c("OccRep", "Prop.Freq", "Day")
+h5$Day <- factor(h5$Day,levels=c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"),ordered=T)
+H5 <-ggplot(h5,aes(x=as.factor(Day),y=Prop.Freq,fill=factor(OccRep)))+
+  geom_bar(stat="identity",position="dodge",colour="black")+
+  scale_fill_manual(values= c("#599ad3", "#f9a65a"),name="Day",labels=c("Occurred", "Reported"))+
+  xlab("Day")+ylab("Frequency") + ggtitle("Violent Crime: Frequency by Day") + theme(legend.position ="right")+ geom_text(aes(label=signif(Prop.Freq,3)), position=position_dodge(width=0.9), vjust=-0.25)
+H5
+
+#5 Violent Crime: Days Unreported
+y11 <- as.data.frame(prop.table(table(z4$DaysUnreported[which(z4$ViolentCrime==1)])) %>% head(20))
+names(y11)[1] <- "Days Unreported"
+kable(y11)
+
+#6 Violent Crime: Common Victims
+z4violent2 <- transform(z4violent, victim = paste(VictimAgeGroups,SimplifiedDescent,Victim.Sex, sep=", "))
+x9 <- as.data.frame(table(z4violent2$victim)) %>% arrange(desc(Freq)) %>% head(10)
+names(x9)[1] <- "Demographic"
+kable(x9)
+
+#7 Mapping of Every Violent Crime Committed in Data by Area ID
+LA <- get_map(location= "los angeles map",zoom=10,source="google", maptype="satellite")
+LAmap <- ggmap(LA)
+LAmap + geom_point(aes(x=Longitude, y=Latitude,color=Area.ID), data=z4violent,size=1) + ggtitle("Mapping of Area ID") + xlab("Latitude") + ylab("Longitude")
+```
+
+
+#Part Three: Time Series Analysis
+```{r}
+vcrime <- z4[which(z4$ViolentCrime==1),]
+vcrime$monthyear <- (format(ymd(vcrime$Date.Occurred), "%Y-%m"))
+vcrimetable <- as.data.frame(table(vcrime$monthyear))
+str(vcrimetable)
+vcrimetable$Var1 <- ymd(as.character(vcrimetable$Var1), truncated = 1L)
+vcrimetable <- vcrimetable[-101,]
+vcrimefreq <- ts(vcrimetable$Freq)
+
+auto.arima(vcrimetable$Freq)
+vcrimefreq
+plot.ts(vcrimefreq) #There appears to be trend and seasonality. Variance looks to be constant.
+#So we will remove the trend by taking the difference
+par(mfrow=c(3,1))
+plot(diff(vcrimefreq)) #d=1
+acf(diff(vcrimefreq)) #ACF of the difference model shows strong autocorrelation with lag 12, indicating yearly seasonality.
+pacf(diff(vcrimefreq))
+plot(diff(diff(vcrimefreq), 12)) #now take the seasonal difference
+
+Box.test(diff(diff(vcrimefreq), 12), lag= log(length(vcrimefreq))) #lag = logarithm of length of the ts... why? idk
+#Ljung-box test is very small, therefore we reject the null hypothesis that there is no autocorrelation between previous lags, indicating that there is autocorrelation.
+
+acf(diff(diff(vcrimefreq), 12)) #acf suggests MA(1), and spike at lag 12, indicating SMA(1)
+pacf(diff(diff(vcrimefreq), 12)) #pacf suggests AR(3), #2 spikes 12, 11 indicate SAR 0,1, or 2
+
+#Comparing various models
+for(p in 0:3){
+  for(q in 0:1){
+    for(i in 0:1){
+      for(j in 0:1){
+        if(p+1+q+i+1+j<=6){
+          model<-arima(x=vcrimefreq, order = c(p,1,q), seasonal = list(order=c(i,1,j), period=12))
+          pval<-Box.test(model$residuals, lag=log(length(model$residuals)))
+          sse<-sum(model$residuals^2)
+          cat(p,1,q,i,1,j,12, 'AIC=', model$aic, ' SSE=',sse,' p-VALUE=', pval$p.value,'\n')
+        }
+      }
+    }
+  }
+}
+
+p=0;q=1;P=0;Q=1
+ts.model <- arima(x=vcrimefreq, order=c(p,1,q), seasonal = list(order=c(P,1,Q),period=12))
+#I end up choosing ARIMA(0,1,1,0,1,1)12 model, as it conforms to the parsimony principle and outputs the smallest AIC of models I tested
+#Check p values for model
+Box.test(ts.model$residuals, lag = log(length(ts.model$residuals)))
+
+#Look at residuals to see if there is any remaining autocorrelation
+sarima(vcrimefreq,0,1,1,0,1,1,12)
+#Model: X_t = X_t-1 + X_t-12 - X_t-13 + Z_t - .5874*Z_t-1 - .6801*Z_t-12 + .399*Z_t-13
+par(mfrow=c(1,1))
+#Note: Monthly Time series Starts January-2010, ends April-2018.
+
+forecast(ts.model)
+
+#Forecasts for the next two years
+autoplot(forecast(ts.model)) +ggtitle("Monthly Forecasts for May 2018 - May 2020") +ylab("Violent Crime Frequency")  + xlab("Month (x=1=January 2010)")
+ts.model
+```
+
+
+
+
+
+
+
+#Part Four: Logistic Regression
+```{r}
+#Splitting data into a training and test dataset
+set.seed(100)
+sample1 <- sample(nrow(z4), .7*nrow(z4),replace= F)
+train <- z4[sample1,]
+test <- z4[-sample1,]
+
+
+interaction.plot(train$SimplifiedDescent, train$Victim.Sex, train$ViolentCrime,trace.label= "Sex", xlab="Victim Descent", ylab = "Violent Crime", col=2:5)
+#In terms of percentage of crimes, if a man or woman of Black/Hispanic descent are victims of a crime, the crime is more likely to be violent compared to Asian or White victims.  Women of all races are victims in violent crimes more often that men. Of the crimes reported where the victim was a black woman, over 50% was a violent crime.
+
+interaction.plot(as.factor(train$Area.ID), train$SimplifiedDescent, train$ViolentCrime,xlab= "Area ID", ylab= "Violent Crime", trace.label= "Victim Descent", xtick=T,col=2:6)
+#Reiterates the observation that black/hispanic people in Los Angeles face violent crimes more often than whites/asians. Lines are parallel which indicates this observation is true for all areas in city of LA. Shows that the percentage of crimes which are violent varies based on the crime's Area ID.
+interaction.plot(as.factor(train$Area.ID), train$Victim.Sex, train$ViolentCrime,trace.label= "Sex", xlab="Area ID", ylab = "Violent Crime", col=2:5, xtick=T)
+#All interactions are parallel indicating no interaction effect.
+
+#Making logistic regression model based upon significant variables
+m2 <-glm(ViolentCrime ~ Victim.Age + DaysUnreported + SimplifiedDescent + Status.Description + Area.ID, family = "binomial", data=train)
+summary(m2)
+
+#Victim Age is a significant predictor in whether a crime is violent, with the older the victim's age is, the less likely the crime will be of violent nature.
+exp(m2$coefficients)
+
+#Making predictions
+predictionsCrime <- predict(m2, test, type="response")
+predictionsCrime[predictionsCrime > .5] <- 1
+predictionsCrime[predictionsCrime <= .5] <- 0
+predictions1 <- (data.frame(predictionsCrime, test$ViolentCrime))
+predictions1 <- predictions1[-which(is.na(predictions1[,1])),]
+table(predictions1)
+(202451+75273)/(202451+75273+77136+33977)
+#Result: Predicted correct outcome 71.4% of the time.
+
+
+```
+
